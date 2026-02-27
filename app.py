@@ -1,185 +1,142 @@
 import streamlit as st
 import pickle
 import numpy as np
-from PIL import Image
 import tensorflow as tf
+from PIL import Image
+import cv2
 
 # -------------------- PAGE CONFIG --------------------
 st.set_page_config(
-    page_title="SASYA RAKSHAK | Edge-AI Crop Diagnostics",
+    page_title="SASYA RAKSHAK | Mob-Res + SE",
     page_icon="🌿",
     layout="wide"
 )
 
-# -------------------- CUSTOM CSS THEME --------------------
-st.markdown("""
-<style>
-
-body {
-    background-color: #0f1f16;
-}
-
-.main {
-    background: linear-gradient(135deg, #0f1f16, #1e3a2b);
-    color: #e6f2e9;
-}
-
-h1, h2, h3 {
-    color: #d4f5dc;
-    font-weight: 600;
-}
-
-.section-card {
-    background-color: rgba(255,255,255,0.05);
-    padding: 20px;
-    border-radius: 12px;
-    border: 1px solid rgba(255,255,255,0.1);
-    margin-bottom: 20px;
-}
-
-.metric-box {
-    background-color: rgba(34, 139, 34, 0.2);
-    padding: 15px;
-    border-radius: 10px;
-    border-left: 5px solid #4CAF50;
-}
-
-.status-healthy {
-    color: #4CAF50;
-    font-weight: bold;
-}
-
-.status-disease {
-    color: #ff6b6b;
-    font-weight: bold;
-}
-
-footer {visibility: hidden;}
-</style>
-""", unsafe_allow_html=True)
-
-
-# -------------------- LOAD MODEL --------------------
+# -------------------- LOAD MODEL (.pkl contains Keras model) --------------------
 @st.cache_resource
 def load_model():
-    with open('mob_res_se_final.pkl', 'rb') as file:
-        model = pickle.load(file)
+    with open("mob_res_se_final.pkl", "rb") as f:
+        model = pickle.load(f)
     return model
 
 model = load_model()
 
-# -------------------- CLASS LABELS --------------------
+# -------------------- CLASS NAMES --------------------
 CLASS_NAMES = [
-    'Apple - Apple Scab', 'Apple - Black Rot', 'Apple - Cedar Apple Rust', 'Apple - Healthy',
-    'Blueberry - Healthy', 
-    'Cherry - Powdery Mildew', 'Cherry - Healthy', 
-    'Corn - Cercospora Leaf Spot / Gray Leaf Spot', 'Corn - Common Rust', 'Corn - Northern Leaf Blight', 'Corn - Healthy', 
-    'Grape - Black Rot', 'Grape - Esca (Black Measles)', 'Grape - Leaf Blight (Isariopsis Leaf Spot)', 'Grape - Healthy', 
-    'Orange - Haunglongbing (Citrus Greening)', 
-    'Peach - Bacterial Spot', 'Peach - Healthy', 
-    'Pepper (Bell) - Bacterial Spot', 'Pepper (Bell) - Healthy', 
-    'Potato - Early Blight', 'Potato - Late Blight', 'Potato - Healthy', 
-    'Raspberry - Healthy', 
-    'Soybean - Healthy', 
-    'Squash - Powdery Mildew', 
-    'Strawberry - Leaf Scorch', 'Strawberry - Healthy', 
-    'Tomato - Bacterial Spot', 'Tomato - Early Blight', 'Tomato - Late Blight', 'Tomato - Leaf Mold', 
-    'Tomato - Septoria Leaf Spot', 'Tomato - Spider Mites', 'Tomato - Target Spot', 
-    'Tomato - Yellow Leaf Curl Virus', 'Tomato - Mosaic Virus', 'Tomato - Healthy'
+    'Apple___Apple_scab','Apple___Black_rot','Apple___Cedar_apple_rust','Apple___healthy',
+    'Blueberry___healthy','Cherry___Powdery_mildew','Cherry___healthy',
+    'Corn___Cercospora_leaf_spot','Corn___Common_rust','Corn___Northern_Leaf_Blight','Corn___healthy',
+    'Grape___Black_rot','Grape___Esca_(Black_Measles)',
+    'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)','Grape___healthy',
+    'Orange___Haunglongbing_(Citrus_greening)',
+    'Peach___Bacterial_spot','Peach___healthy',
+    'Pepper___Bacterial_spot','Pepper___healthy',
+    'Potato___Early_blight','Potato___Late_blight','Potato___healthy',
+    'Raspberry___healthy','Soybean___healthy','Squash___Powdery_mildew',
+    'Strawberry___Leaf_scorch','Strawberry___healthy',
+    'Tomato___Bacterial_spot','Tomato___Early_blight','Tomato___Late_blight',
+    'Tomato___Leaf_Mold','Tomato___Septoria_leaf_spot','Tomato___Spider_mites',
+    'Tomato___Target_Spot','Tomato___Tomato_Yellow_Leaf_Curl_Virus',
+    'Tomato___Tomato_mosaic_virus','Tomato___healthy'
 ]
 
 # -------------------- PREPROCESS --------------------
 def preprocess_image(image):
     image = image.resize((128, 128))
+    img_array = np.array(image) / 255.0
+    return np.expand_dims(img_array, axis=0)
+
+# -------------------- GRAD-CAM --------------------
+def get_gradcam_heatmap(model, img_array, layer_name):
+
+    grad_model = tf.keras.models.Model(
+        inputs=model.input,
+        outputs=[model.get_layer(layer_name).output, model.output]
+    )
+
+    with tf.GradientTape() as tape:
+        conv_out, preds = grad_model(img_array)
+
+        # Handle pickle edge-case
+        if isinstance(preds, list):
+            preds = preds[0]
+
+        pred_class = tf.argmax(preds[0])
+        class_score = preds[:, pred_class]
+
+    grads = tape.gradient(class_score, conv_out)
+
+    weights = tf.reduce_mean(grads, axis=(0, 1, 2))
+    heatmap = tf.reduce_sum(conv_out[0] * weights, axis=-1)
+
+    heatmap = tf.maximum(heatmap, 0)
+    heatmap /= (tf.reduce_max(heatmap) + 1e-8)
+
+    return heatmap.numpy()
+
+def overlay_heatmap(original_img, heatmap):
+    heatmap = cv2.resize(heatmap, (original_img.shape[1], original_img.shape[0]))
+    heatmap = np.uint8(255 * heatmap)
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+    overlay = heatmap * 0.4 + original_img
+    return np.uint8(overlay)
+
+# -------------------- UI --------------------
+st.title("🌿 SASYA RAKSHAK")
+st.subheader("Mob-Res + SE Attention | Edge-AI Crop Health Assessment")
+
+uploaded_file = st.file_uploader("Upload Leaf Image", type=["jpg", "jpeg", "png"])
+
+if uploaded_file:
+    image = Image.open(uploaded_file).convert("RGB")
     img_array = np.array(image)
+    processed = preprocess_image(image)
 
-    if len(img_array.shape) == 2 or img_array.shape[-1] != 3:
-        image = image.convert("RGB")
-        img_array = np.array(image)
+    preds = model.predict(processed)[0]
 
-    img_array = img_array / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
-    return img_array
+    # ---- Top 3 ----
+    top3_idx = np.argsort(preds)[::-1][:3]
+    top3_classes = [CLASS_NAMES[i] for i in top3_idx]
+    top3_probs = [preds[i] * 100 for i in top3_idx]
 
+    col1, col2 = st.columns(2)
 
-# -------------------- HEADER --------------------
-st.markdown("""
-# 🌿SASYA RAKSHAK  
-### Attention-Enhanced Edge-AI for Real-Time Crop Health Assessment
-""")
+    with col1:
+        st.image(image, caption="Input Leaf", width=450)
 
-st.markdown("""
-<div class="section-card">
-<b>Architecture:</b> Mob-Res + SE (Dual Pathway Hybrid CNN)<br>
-<b>Design Philosophy:</b> Lightweight | Robust | Explainable<br>
-<b>Deployment Target:</b> Offline Mobile Edge-AI Systems
-</div>
-""", unsafe_allow_html=True)
+    with col2:
+        st.markdown("### 🔎 Predicted Class")
+        st.success(top3_classes[0])
 
+        st.markdown("### 📊 Confidence")
+        st.progress(int(top3_probs[0]))
+        st.write(f"{top3_probs[0]:.2f}%")
 
-# -------------------- MAIN LAYOUT --------------------
-col1, col2 = st.columns([1, 1])
+        st.markdown("### 📈 Top-3 Probabilities")
+        for i in range(3):
+            st.write(f"{i+1}. {top3_classes[i]} — {top3_probs[i]:.2f}%")
+            st.progress(int(top3_probs[i]))
 
-with col1:
-    st.markdown("## 📤 Upload Leaf Image")
-    uploaded_file = st.file_uploader("Supported formats: JPG / PNG", type=["jpg", "jpeg", "png"])
+    # -------------------- GRAD-CAM SECTION --------------------
+    st.markdown("---")
+    st.markdown("## 🔍 Explainable AI (Grad-CAM)")
 
-    if uploaded_file:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Input Leaf Sample", use_container_width=True)
+    try:
+        heatmap = get_gradcam_heatmap(model, processed, "conv2d_8")
+        overlay = overlay_heatmap(img_array, heatmap)
 
+        # Centered image block
+        col_left, col_center, col_right = st.columns([1, 2, 1])
 
-with col2:
-    st.markdown("## 🧠 Diagnostic Output")
+        with col_center:
+            st.image(overlay, caption="Grad-CAM (Residual Path)", width=500)
 
-    if uploaded_file:
-        with st.spinner("Executing Dual-Pathway Feature Extraction..."):
+        st.info("Red regions indicate strong diagnostic activation.")
 
-            processed_image = preprocess_image(image)
-            predictions = model.predict(processed_image)
+    except Exception as e:
+        st.error("Grad-CAM could not be generated.")
+        st.write(str(e))
 
-            predicted_class_index = np.argmax(predictions[0])
-            predicted_class_name = CLASS_NAMES[predicted_class_index]
-            confidence = predictions[0][predicted_class_index] * 100
-
-            st.markdown(f"### 🔎 Predicted Class")
-            st.markdown(f"<div class='metric-box'>{predicted_class_name}</div>", unsafe_allow_html=True)
-
-            st.markdown("### 📊 Confidence Score")
-            st.progress(int(confidence))
-            st.write(f"{confidence:.2f}% certainty")
-
-            if "Healthy" in predicted_class_name:
-                st.markdown("<p class='status-healthy'>✔ Leaf Condition: Healthy</p>", unsafe_allow_html=True)
-            else:
-                st.markdown("<p class='status-disease'>⚠ Disease Detected – Intervention Recommended</p>", unsafe_allow_html=True)
-
-
-# -------------------- ARCHITECTURE SECTION --------------------
 st.markdown("---")
-st.markdown("## ⚙ System Architecture Overview")
-
-st.markdown("""
-<div class="section-card">
-
-<b>Stage 1:</b> Image Normalization (128×128) <br>
-<b>Stage 2:</b> Dual Feature Extraction  
-&nbsp;&nbsp;&nbsp;&nbsp;• Residual Blocks → Fine-Grained Lesion Textures  
-&nbsp;&nbsp;&nbsp;&nbsp;• MobileNetV2 → Global Structural Patterns  
-
-<b>Stage 3:</b> Spatial SE Attention (Feature Prioritization)  
-<b>Stage 4:</b> Feature Concatenation (1536-D Fusion Vector)  
-<b>Stage 5:</b> Channel Attention Recalibration  
-<b>Stage 6:</b> Softmax Classification (38 Classes)  
-
-</div>
-""", unsafe_allow_html=True)
-
-
-# -------------------- FOOTER --------------------
-st.markdown("---")
-st.markdown("""
-<center>
-AI-Powered Precision Agriculture | Edge-Optimized Deep Learning | Explainable AI Integration  
-</center>
-""", unsafe_allow_html=True)
+st.caption("Hybrid Lightweight CNN | SE Attention Fusion | Explainable AI Enabled")
